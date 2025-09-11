@@ -7,9 +7,9 @@ function App() {
 
   return (
     <>
-      {/* <WorkflowEditor /> */}
+      <WorkflowEditor />
       {/* <FileUploader /> */}
-      <WorkflowEditor2 />
+      {/* <WorkflowEditor2 /> */}
     </>
   )
 }
