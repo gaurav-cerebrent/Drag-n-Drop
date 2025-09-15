@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { Trash2, Plus, Workflow, Settings, X, Sparkles, MessageCircle, Layers3 } from 'lucide-react';
+import { Trash2, Plus, Workflow, Settings, X, Sparkles, MessageCircle, Layers3, ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
 import TopBar from './TopBar';
 import ChatSidebar from './ChatSidebar';
 import NodesSidebar from './NodesSidebar';
@@ -33,6 +33,13 @@ const WorkflowEditor = () => {
   const [isDraggingNode, setIsDraggingNode] = useState(false);
   const [dragOffset, setDragOffset] = useState<Position>({ x: 0, y: 0 });
   
+  // Zoom and pan states
+  const [zoomLevel, setZoomLevel] = useState(1);
+  const [panOffset, setPanOffset] = useState<Position>({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
+  const [panStartPos, setPanStartPos] = useState<Position>({ x: 0, y: 0 });
+  const [lastPanOffset, setLastPanOffset] = useState<Position>({ x: 0, y: 0 });
+  
   // Sidebar toggle state
   const [rightSidebarMode, setRightSidebarMode] = useState<'chat' | 'nodes'>('chat');
   
@@ -46,7 +53,7 @@ const WorkflowEditor = () => {
   // Connection states
   const [isConnecting, setIsConnecting] = useState(false);
   const [connectionStart, setConnectionStart] = useState<{nodeId: string; port: number; type: 'input' | 'output'} | null>(null);
-  const [tempConnection, setTempConnection] = useState<Position | null>(null);
+  const [tempConnectionEnd, setTempConnectionEnd] = useState<Position | null>(null);
   
   // Top bar states
   const [workflowName, setWorkflowName] = useState<string>('Stagnant High-Value Deals');
@@ -54,6 +61,7 @@ const WorkflowEditor = () => {
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  const transformRef = useRef<HTMLDivElement>(null);
 
   const generateId = () => `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
@@ -194,8 +202,42 @@ const WorkflowEditor = () => {
     setNodes(prev => [...prev, newNode]);
   };
 
-  // Get port position relative to canvas
-  const getPortPosition = (nodeId: string, portIndex: number, type: 'input' | 'output'): Position | null => {
+  // Zoom functions
+  const zoomIn = () => {
+    setZoomLevel(prev => Math.min(prev * 1.2, 3));
+  };
+
+  const zoomOut = () => {
+    setZoomLevel(prev => Math.max(prev / 1.2, 0.25));
+  };
+
+  const resetZoom = () => {
+    setZoomLevel(1);
+    setPanOffset({ x: 0, y: 0 });
+    setLastPanOffset({ x: 0, y: 0 });
+  };
+
+  // Convert screen coordinates to canvas coordinates (accounting for zoom and pan)
+  const screenToCanvas = (screenPos: Position): Position => {
+    if (!canvasRef.current) return screenPos;
+    
+    const rect = canvasRef.current.getBoundingClientRect();
+    return {
+      x: (screenPos.x - rect.left - panOffset.x) / zoomLevel,
+      y: (screenPos.y - rect.top - panOffset.y) / zoomLevel
+    };
+  };
+
+  // Convert canvas coordinates to screen coordinates
+  const canvasToScreen = (canvasPos: Position): Position => {
+    return {
+      x: canvasPos.x * zoomLevel + panOffset.x,
+      y: canvasPos.y * zoomLevel + panOffset.y
+    };
+  };
+
+  // Get port position in CANVAS coordinates (not screen coordinates)
+  const getPortCanvasPosition = (nodeId: string, portIndex: number, type: 'input' | 'output'): Position | null => {
     const node = nodes.find(n => n.id === nodeId);
     if (!node) return null;
 
@@ -226,17 +268,32 @@ const WorkflowEditor = () => {
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!canvasRef.current) return;
 
+    const currentScreenPos = { x: e.clientX, y: e.clientY };
     const rect = canvasRef.current.getBoundingClientRect();
-    const currentPos = {
+    const canvasScreenPos = {
       x: e.clientX - rect.left,
       y: e.clientY - rect.top
     };
 
+    // Handle panning - Fixed to work properly with zoom
+    if (isPanning) {
+      const deltaX = currentScreenPos.x - panStartPos.x;
+      const deltaY = currentScreenPos.y - panStartPos.y;
+      
+      setPanOffset({
+        x: lastPanOffset.x + deltaX,
+        y: lastPanOffset.y + deltaY
+      });
+      
+      return;
+    }
+
     // Handle node dragging
     if (isDraggingNode && selectedNodeId) {
+      const canvasPos = screenToCanvas(canvasScreenPos);
       const newPosition = {
-        x: Math.max(0, currentPos.x - dragOffset.x),
-        y: Math.max(0, currentPos.y - dragOffset.y)
+        x: Math.max(0, canvasPos.x - dragOffset.x),
+        y: Math.max(0, canvasPos.y - dragOffset.y)
       };
       
       setNodes(prev => prev.map(node => 
@@ -244,37 +301,68 @@ const WorkflowEditor = () => {
       ));
     }
 
-    // Handle connection drawing
+    // Handle connection drawing - Fixed coordinate system
     if (isConnecting) {
-      setTempConnection(currentPos);
+      const canvasPos = screenToCanvas(canvasScreenPos);
+      setTempConnectionEnd(canvasPos);
     }
-  }, [isDraggingNode, selectedNodeId, dragOffset, isConnecting]);
+  }, [isDraggingNode, selectedNodeId, dragOffset, isConnecting, isPanning, panStartPos, lastPanOffset, zoomLevel]);
 
   const handleMouseUp = useCallback(() => {
+    if (isPanning) {
+      setLastPanOffset(panOffset);
+    }
     setIsDraggingNode(false);
-  }, []);
+    setIsPanning(false);
+  }, [isPanning, panOffset]);
 
   const handleCanvasClick = useCallback((e: React.MouseEvent) => {
     if (isConnecting) {
       setIsConnecting(false);
       setConnectionStart(null);
-      setTempConnection(null);
+      setTempConnectionEnd(null);
     }
     setSelectedNodeId(null);
   }, [isConnecting]);
 
+  const handleCanvasMouseDown = useCallback((e: React.MouseEvent) => {
+    if (e.button === 1 || (e.button === 0 && e.ctrlKey)) { // Middle mouse or Ctrl+Left click
+      e.preventDefault();
+      setIsPanning(true);
+      setPanStartPos({ x: e.clientX, y: e.clientY });
+      setLastPanOffset(panOffset);
+    }
+  }, [panOffset]);
+
+  // Handle wheel zoom
+  const handleWheel = useCallback((e: WheelEvent) => {
+    if (e.ctrlKey) {
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? 0.9 : 1.1;
+      setZoomLevel(prev => Math.max(0.25, Math.min(3, prev * delta)));
+    }
+  }, []);
+
   useEffect(() => {
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
+    
+    const canvas = canvasRef.current;
+    if (canvas) {
+      canvas.addEventListener('wheel', handleWheel, { passive: false });
+    }
 
     return () => {
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
+      if (canvas) {
+        canvas.removeEventListener('wheel', handleWheel);
+      }
     };
-  }, [handleMouseMove, handleMouseUp]);
+  }, [handleMouseMove, handleMouseUp, handleWheel]);
 
   const handleNodeMouseDown = useCallback((e: React.MouseEvent, nodeId: string) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || isPanning) return;
     
     const node = nodes.find(n => n.id === nodeId);
     if (!node || !canvasRef.current) return;
@@ -282,9 +370,14 @@ const WorkflowEditor = () => {
     setSelectedNodeId(nodeId);
     
     const rect = canvasRef.current.getBoundingClientRect();
+    const canvasPos = screenToCanvas({
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top
+    });
+    
     const offset = {
-      x: (e.clientX - rect.left) - node.position.x,
-      y: (e.clientY - rect.top) - node.position.y
+      x: canvasPos.x - node.position.x,
+      y: canvasPos.y - node.position.y
     };
     
     setDragOffset(offset);
@@ -292,7 +385,7 @@ const WorkflowEditor = () => {
     
     e.preventDefault();
     e.stopPropagation();
-  }, [nodes]);
+  }, [nodes, isPanning, zoomLevel]);
 
   const handlePortClick = useCallback((e: React.MouseEvent, nodeId: string, portIndex: number, type: 'input' | 'output') => {
     e.preventDefault();
@@ -302,9 +395,16 @@ const WorkflowEditor = () => {
       // Start new connection from output
       setConnectionStart({ nodeId, port: portIndex, type });
       setIsConnecting(true);
-      const portPos = getPortPosition(nodeId, portIndex, type);
+      // Initialize with the port position in screen coordinates
+      if (!canvasRef.current) return;
+      const portPos = getPortCanvasPosition(nodeId, portIndex, type);
       if (portPos) {
-        setTempConnection(portPos);
+        const rect = canvasRef.current.getBoundingClientRect();
+        const screenPos = canvasToScreen(portPos);
+        setTempConnectionEnd({
+          x: screenPos.x - rect.left,
+          y: screenPos.y - rect.top
+        });
       }
     } else if (type === 'input' && connectionStart && connectionStart.type === 'output') {
       // Complete connection to input - allow multiple connections to same input
@@ -329,7 +429,7 @@ const WorkflowEditor = () => {
       
       setIsConnecting(false);
       setConnectionStart(null);
-      setTempConnection(null);
+      setTempConnectionEnd(null);
     }
   }, [connectionStart, connections, nodes]);
 
@@ -360,16 +460,21 @@ const WorkflowEditor = () => {
     try {
       const template = JSON.parse(templateData);
       const rect = canvasRef.current.getBoundingClientRect();
+      const screenDropPos = {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top
+      };
+      const canvasDropPos = screenToCanvas(screenDropPos);
       const dropPosition = {
-        x: e.clientX - rect.left - 110,
-        y: e.clientY - rect.top - 70
+        x: canvasDropPos.x - 110,
+        y: canvasDropPos.y - 70
       };
 
       createNode(template, dropPosition);
     } catch (error) {
       console.error('Drop error:', error);
     }
-  }, []);
+  }, [zoomLevel]);
 
   const deleteNode = (nodeId: string) => {
     setNodes(prev => prev.filter(n => n.id !== nodeId));
@@ -397,42 +502,52 @@ const WorkflowEditor = () => {
     }
   };
 
-  // Render temporary connection
+  // Render temporary connection - Fixed to work with proper coordinates
   const renderTempConnection = () => {
-    if (!isConnecting || !connectionStart || !tempConnection) return null;
+    if (!isConnecting || !connectionStart || !tempConnectionEnd) return null;
     
-    const startPos = getPortPosition(connectionStart.nodeId, connectionStart.port, connectionStart.type);
+    const startPos = getPortCanvasPosition(connectionStart.nodeId, connectionStart.port, connectionStart.type);
     if (!startPos) return null;
     
-    const midX = startPos.x + (tempConnection.x - startPos.x) * 0.6;
+    const midX = startPos.x + (tempConnectionEnd.x - startPos.x) * 0.6;
+    const pathD = `M ${startPos.x} ${startPos.y} C ${midX} ${startPos.y} ${midX} ${tempConnectionEnd.y} ${tempConnectionEnd.x} ${tempConnectionEnd.y}`;
     
     return (
       <g key="temp-connection">
+        {/* Glow effect */}
         <path
-          d={`M ${startPos.x} ${startPos.y} C ${midX} ${startPos.y} ${midX} ${tempConnection.y} ${tempConnection.x} ${tempConnection.y}`}
-          stroke="url(#tempGradient)"
-          strokeWidth="5"
+          d={pathD}
+          stroke="#8b5cf6"
+          strokeWidth="8"
           fill="none"
-          opacity="0.4"
+          opacity="0.3"
           filter="url(#connection-glow)"
         />
+        {/* Main dotted line */}
         <path
-          d={`M ${startPos.x} ${startPos.y} C ${midX} ${startPos.y} ${midX} ${tempConnection.y} ${tempConnection.x} ${tempConnection.y}`}
-          stroke="url(#tempGradient)"
-          strokeWidth="3"
+          d={pathD}
+          stroke="#8b5cf6"
+          strokeWidth="4"
           fill="none"
-          strokeDasharray="8,4"
+          strokeDasharray="12,8"
+          opacity="0.8"
           className="animate-pulse"
         />
+        {/* Animated flow dots */}
+        <circle r="4" fill="#ec4899" opacity="0.9">
+          <animateMotion dur="2s" repeatCount="indefinite" path={pathD} />
+          <animate attributeName="opacity" values="0.9;0.4;0.9" dur="1.5s" repeatCount="indefinite" />
+        </circle>
+        {/* End point indicator */}
         <circle
-          cx={tempConnection.x}
-          cy={tempConnection.y}
-          r="6"
+          cx={tempConnectionEnd.x}
+          cy={tempConnectionEnd.y}
+          r="8"
           fill="#8b5cf6"
           stroke="#ec4899"
-          strokeWidth="2"
+          strokeWidth="3"
           className="animate-pulse"
-          style={{ filter: 'drop-shadow(0 0 8px rgba(139, 92, 246, 0.5))' }}
+          style={{ filter: 'drop-shadow(0 0 8px rgba(139, 92, 246, 0.6))' }}
         />
       </g>
     );
@@ -632,251 +747,297 @@ const WorkflowEditor = () => {
 
         {/* Canvas */}
         <div className="flex-1 relative bg-gray-100 overflow-hidden">
+          {/* Zoom Controls */}
+          <div className="absolute top-4 left-4 z-30 flex flex-col bg-white rounded-lg shadow-lg border border-gray-200 overflow-hidden">
+            <button
+              onClick={zoomIn}
+              className="px-3 py-2 hover:bg-gray-50 transition-colors border-b border-gray-200"
+              title="Zoom In"
+            >
+              <ZoomIn className="w-4 h-4" />
+            </button>
+            <button
+              onClick={zoomOut}
+              className="px-3 py-2 hover:bg-gray-50 transition-colors border-b border-gray-200"
+              title="Zoom Out"
+            >
+              <ZoomOut className="w-4 h-4" />
+            </button>
+            <button
+              onClick={resetZoom}
+              className="px-3 py-2 hover:bg-gray-50 transition-colors"
+              title="Reset Zoom"
+            >
+              <RotateCcw className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* Zoom Level Indicator */}
+          <div className="absolute top-4 left-20 z-30 bg-white rounded-lg shadow-lg border border-gray-200 px-3 py-2">
+            <span className="text-sm text-gray-600">{Math.round(zoomLevel * 100)}%</span>
+          </div>
+
+          {/* Toggle Buttons */}
+          <div className="absolute top-4 right-4 z-30 flex bg-white rounded-lg shadow-lg border border-gray-200 overflow-hidden">
+            <button
+              onClick={() => setRightSidebarMode('chat')}
+              className={`px-4 py-2 text-sm font-medium transition-colors flex items-center gap-2 ${
+                rightSidebarMode === 'chat'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-white text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              <MessageCircle className="w-4 h-4" />
+              Chat
+            </button>
+            <button
+              onClick={() => setRightSidebarMode('nodes')}
+              className={`px-4 py-2 text-sm font-medium transition-colors flex items-center gap-2 ${
+                rightSidebarMode === 'nodes'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-white text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              <Layers3 className="w-4 h-4" />
+              Nodes
+            </button>
+          </div>
+
           {/* Canvas Area */}
           <div
             ref={canvasRef}
-            className="w-full h-full relative"
+            className="w-full h-full relative cursor-grab active:cursor-grabbing"
             style={{
               backgroundImage: `
                 radial-gradient(circle at 1px 1px, rgb(156 163 175) 1px, transparent 0),
                 linear-gradient(0deg, transparent 24%, rgb(229 231 235 / 0.5) 25%, rgb(229 231 235 / 0.5) 26%, transparent 27%, transparent 74%, rgb(229 231 235 / 0.5) 75%, rgb(229 231 235 / 0.5) 76%, transparent 77%, transparent),
                 linear-gradient(90deg, transparent 24%, rgb(229 231 235 / 0.5) 25%, rgb(229 231 235 / 0.5) 26%, transparent 27%, transparent 74%, rgb(229 231 235 / 0.5) 75%, rgb(229 231 235 / 0.5) 76%, transparent 77%, transparent)
               `,
-              backgroundSize: '25px 25px, 25px 25px, 25px 25px'
+              backgroundSize: `${25 * zoomLevel}px ${25 * zoomLevel}px, ${25 * zoomLevel}px ${25 * zoomLevel}px, ${25 * zoomLevel}px ${25 * zoomLevel}px`,
+              backgroundPosition: `${panOffset.x}px ${panOffset.y}px`
             }}
             onDrop={handleCanvasDrop}
             onDragOver={(e) => e.preventDefault()}
             onClick={handleCanvasClick}
+            onMouseDown={handleCanvasMouseDown}
           >
-            {/* Toggle Buttons */}
-            <div className="absolute top-4 right-4 z-30 flex bg-white rounded-lg shadow-lg border border-gray-200 overflow-hidden">
-              <button
-                onClick={() => setRightSidebarMode('chat')}
-                className={`px-4 py-2 text-sm font-medium transition-colors flex items-center gap-2 ${
-                  rightSidebarMode === 'chat'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-white text-gray-600 hover:bg-gray-50'
-                }`}
-              >
-                <MessageCircle className="w-4 h-4" />
-                Chat
-              </button>
-              <button
-                onClick={() => setRightSidebarMode('nodes')}
-                className={`px-4 py-2 text-sm font-medium transition-colors flex items-center gap-2 ${
-                  rightSidebarMode === 'nodes'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-white text-gray-600 hover:bg-gray-50'
-                }`}
-              >
-                <Layers3 className="w-4 h-4" />
-                Nodes
-              </button>
-            </div>
-
-            {/* SVG for connections */}
-            <svg
-              ref={svgRef}
-              className="absolute inset-0 w-full h-full z-10"
-              style={{ pointerEvents: 'none' }}
+            {/* Transform Container */}
+            <div
+              ref={transformRef}
+              className="absolute inset-0"
+              style={{
+                transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoomLevel})`,
+                transformOrigin: '0 0'
+              }}
             >
-              <defs>
-                <marker id="arrowhead" markerWidth="12" markerHeight="8" 
-                refX="10" refY="4" orient="auto">
-                  <polygon points="0 0, 12 4, 0 8" fill="#10b981" />
-                </marker>
-                <filter id="connection-glow">
-                  <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
-                  <feMerge> 
-                    <feMergeNode in="coloredBlur"/>
-                    <feMergeNode in="SourceGraphic"/> 
-                  </feMerge>
-                </filter>
-                <linearGradient id="connectionGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                  <stop offset="0%" stopColor="#06b6d4" stopOpacity="1" />
-                  <stop offset="50%" stopColor="#10b981" stopOpacity="1" />
-                  <stop offset="100%" stopColor="#34d399" stopOpacity="1" />
-                </linearGradient>
-                <linearGradient id="tempGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                  <stop offset="0%" stopColor="#8b5cf6" stopOpacity="0.8" />
-                  <stop offset="100%" stopColor="#ec4899" stopOpacity="0.6" />
-                </linearGradient>
-              </defs>
-              
-              {/* Render connections */}
-              {connections.map((connection) => {
-                const fromPos = getPortPosition(connection.fromNodeId, connection.fromPort, 'output');
-                const toPos = getPortPosition(connection.toNodeId, connection.toPort, 'input');
-                
-                if (!fromPos || !toPos) return null;
-                
-                const midX = fromPos.x + (toPos.x - fromPos.x) * 0.6;
-                const pathD = `M ${fromPos.x} ${fromPos.y} C ${midX} ${fromPos.y} ${midX} ${toPos.y} ${toPos.x} ${toPos.y}`;
-                
-                return (
-                  <g key={connection.id}>
-                    {/* Background glow path */}
-                    <path
-                      d={pathD}
-                      stroke="#10b981"
-                      strokeWidth="8"
-                      fill="none"
-                      opacity="0.2"
-                      filter="url(#connection-glow)"
-                    />
-                    {/* Main connection path */}
-                    <path
-                      d={pathD}
-                      stroke="#10b981"
-                      strokeWidth="4"
-                      fill="none"
-                      opacity="0.8"
-                      className="transition-all duration-200 hover:opacity-100"
-                    />
-                    {/* Animated flow indicator */}
-                    <circle
-                      r="3"
-                      fill="#34d399"
-                      opacity="0.9"
-                    >
-                      <animateMotion
-                        dur="3s"
-                        repeatCount="indefinite"
-                        path={pathD}
-                      />
-                      <animate
-                        attributeName="opacity"
-                        values="0.9;0.4;0.9"
-                        dur="2s"
-                        repeatCount="indefinite"
-                      />
-                    </circle>
-                    <g style={{ pointerEvents: 'all' }}>
-                      <circle
-                        cx={midX}
-                        cy={(fromPos.y + toPos.y) / 2}
-                        r="12"
-                        fill="#dc2626"
-                        stroke="#fff"
-                        strokeWidth="2"
-                        className="cursor-pointer hover:fill-red-500 transition-all duration-200 hover:scale-110"
-                        style={{ filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.3))' }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setConnections(prev => prev.filter(c => c.id !== connection.id));
-                        }}
-                      />
-                      <text
-                        x={midX}
-                        y={(fromPos.y + toPos.y) / 2}
-                        textAnchor="middle"
-                        dy="0.35em"
-                        fontSize="14"
-                        fill="white"
-                        className="font-bold select-none cursor-pointer"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setConnections(prev => prev.filter(c => c.id !== connection.id));
-                        }}
-                      >
-                        ×
-                      </text>
-                    </g>
-                  </g>
-                );
-              })}
-              
-              {/* Temporary connection while dragging */}
-              {renderTempConnection()}
-            </svg>
-
-            {/* Nodes */}
-            {nodes.map(node => (
-              <div
-                key={node.id}
-                className={`absolute w-55 h-35 rounded-xl shadow-2xl transition-all duration-200 select-none z-20 ${
-                  selectedNodeId === node.id 
-                    ? 'ring-2 ring-blue-400 scale-105' 
-                    : 'hover:scale-105'
-                }`}
+              {/* SVG for connections - positioned within transform container */}
+              <svg
+                ref={svgRef}
+                className="absolute inset-0 z-10 pointer-events-none"
                 style={{
-                  left: node.position.x,
-                  top: node.position.y,
-                  width: '220px',
-                  height: '140px',
-                  background: 'linear-gradient(135deg, #ffffff 0%, #f9fafb 100%)',
-                  border: `2px solid ${selectedNodeId === node.id ? '#3b82f6' : '#d1d5db'}`,
-                  boxShadow: selectedNodeId === node.id ? '0 10px 25px rgba(0,0,0,0.1)' : '0 4px 6px rgba(0,0,0,0.05)'
-                }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setSelectedNodeId(node.id);
+                  width: `${100 / zoomLevel}%`,
+                  height: `${100 / zoomLevel}%`
                 }}
               >
-                <div
-                  className="p-4 rounded-t-lg text-white font-bold text-sm cursor-grab active:cursor-grabbing flex items-center justify-between h-12"
-                  style={{
-                    background: `linear-gradient(135deg, ${node.color} 0%, ${node.color}dd 100%)`
-                  }}
-                  onMouseDown={(e) => handleNodeMouseDown(e, node.id)}
-                >
-                  <span className="truncate flex-1">{node.label}</span>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deleteNode(node.id);
-                    }}
-                    className="ml-2 p-1 hover:bg-white hover:bg-opacity-20 rounded transition-colors"
-                  >
-                    <X size={14} />
-                  </button>
-                </div>
+                <defs>
+                  <marker id="arrowhead" markerWidth="12" markerHeight="8" 
+                  refX="10" refY="4" orient="auto">
+                    <polygon points="0 0, 12 4, 0 8" fill="#10b981" />
+                  </marker>
+                  <filter id="connection-glow">
+                    <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+                    <feMerge> 
+                      <feMergeNode in="coloredBlur"/>
+                      <feMergeNode in="SourceGraphic"/> 
+                    </feMerge>
+                  </filter>
+                  <linearGradient id="connectionGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stopColor="#06b6d4" stopOpacity="1" />
+                    <stop offset="50%" stopColor="#10b981" stopOpacity="1" />
+                    <stop offset="100%" stopColor="#34d399" stopOpacity="1" />
+                  </linearGradient>
+                  <linearGradient id="tempGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stopColor="#8b5cf6" stopOpacity="0.8" />
+                    <stop offset="100%" stopColor="#ec4899" stopOpacity="0.6" />
+                  </linearGradient>
+                </defs>
                 
-                <div className="p-4 h-28 flex justify-between items-center relative">
-                  <div className="flex flex-col justify-center h-full">
-                    {Array.from({ length: node.inputs }, (_, i) => (
-                      <div
-                        key={`input-${i}`}
-                        className="w-4 h-4 bg-green-500 border-2 border-green-600 rounded-full cursor-pointer hover:scale-125 transition-transform absolute z-30 shadow-lg"
-                        style={{
-                          left: '-10px',
-                          top: `${50 + (i - (node.inputs - 1) / 2) * 25}px`
-                        }}
-                        onClick={(e) => handlePortClick(e, node.id, i, 'input')}
+                {/* Render connections using canvas coordinates */}
+                {connections.map((connection) => {
+                  const fromPos = getPortCanvasPosition(connection.fromNodeId, connection.fromPort, 'output');
+                  const toPos = getPortCanvasPosition(connection.toNodeId, connection.toPort, 'input');
+                  
+                  if (!fromPos || !toPos) return null;
+                  
+                  const midX = fromPos.x + (toPos.x - fromPos.x) * 0.6;
+                  const pathD = `M ${fromPos.x} ${fromPos.y} C ${midX} ${fromPos.y} ${midX} ${toPos.y} ${toPos.x} ${toPos.y}`;
+                  
+                  return (
+                    <g key={connection.id}>
+                      {/* Background glow path */}
+                      <path
+                        d={pathD}
+                        stroke="#10b981"
+                        strokeWidth="8"
+                        fill="none"
+                        opacity="0.2"
+                        filter="url(#connection-glow)"
                       />
-                    ))}
-                  </div>
+                      {/* Main connection path */}
+                      <path
+                        d={pathD}
+                        stroke="#10b981"
+                        strokeWidth="4"
+                        fill="none"
+                        opacity="0.8"
+                        className="transition-all duration-200 hover:opacity-100"
+                      />
+                      {/* Animated flow indicator */}
+                      <circle
+                        r="3"
+                        fill="#34d399"
+                        opacity="0.9"
+                      >
+                        <animateMotion
+                          dur="3s"
+                          repeatCount="indefinite"
+                          path={pathD}
+                        />
+                        <animate
+                          attributeName="opacity"
+                          values="0.9;0.4;0.9"
+                          dur="2s"
+                          repeatCount="indefinite"
+                        />
+                      </circle>
+                      {/* Delete button */}
+                      <g style={{ pointerEvents: 'all' }}>
+                        <circle
+                          cx={midX}
+                          cy={(fromPos.y + toPos.y) / 2}
+                          r="12"
+                          fill="#dc2626"
+                          stroke="#fff"
+                          strokeWidth="2"
+                          className="cursor-pointer hover:fill-red-500 transition-all duration-200 hover:scale-110"
+                          style={{ filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.3))' }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setConnections(prev => prev.filter(c => c.id !== connection.id));
+                          }}
+                        />
+                        <text
+                          x={midX}
+                          y={(fromPos.y + toPos.y) / 2}
+                          textAnchor="middle"
+                          dy="0.35em"
+                          fontSize="14"
+                          fill="white"
+                          className="font-bold select-none cursor-pointer"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setConnections(prev => prev.filter(c => c.id !== connection.id));
+                          }}
+                        >
+                          ×
+                        </text>
+                      </g>
+                    </g>
+                  );
+                })}
 
-                  <div className="flex-1 text-center text-xs text-gray-500 px-4">
-                    <div className="text-gray-700 font-medium mb-1">ID: {node.id.slice(-6)}</div>
-                    <div className="flex justify-center items-center gap-4 text-xs">
-                      <span className="flex items-center gap-1">
-                        <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-                        {node.inputs}
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
-                        {node.outputs}
-                      </span>
+                {/* Render temporary connection within the same coordinate system */}
+                {renderTempConnection()}
+              </svg>
+
+              {/* Nodes */}
+              {nodes.map(node => (
+                <div
+                  key={node.id}
+                  className={`absolute w-55 h-35 rounded-xl shadow-2xl transition-all duration-200 select-none z-20 ${
+                    selectedNodeId === node.id 
+                      ? 'ring-2 ring-blue-400 scale-105' 
+                      : 'hover:scale-105'
+                  }`}
+                  style={{
+                    left: node.position.x,
+                    top: node.position.y,
+                    width: '220px',
+                    height: '140px',
+                    background: 'linear-gradient(135deg, #ffffff 0%, #f9fafb 100%)',
+                    border: `2px solid ${selectedNodeId === node.id ? '#3b82f6' : '#d1d5db'}`,
+                    boxShadow: selectedNodeId === node.id ? '0 10px 25px rgba(0,0,0,0.1)' : '0 4px 6px rgba(0,0,0,0.05)'
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedNodeId(node.id);
+                  }}
+                >
+                  <div
+                    className="p-4 rounded-t-lg text-white font-bold text-sm cursor-grab active:cursor-grabbing flex items-center justify-between h-12"
+                    style={{
+                      background: `linear-gradient(135deg, ${node.color} 0%, ${node.color}dd 100%)`
+                    }}
+                    onMouseDown={(e) => handleNodeMouseDown(e, node.id)}
+                  >
+                    <span className="truncate flex-1">{node.label}</span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteNode(node.id);
+                      }}
+                      className="ml-2 p-1 hover:bg-white hover:bg-opacity-20 rounded transition-colors"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                  
+                  <div className="p-4 h-28 flex justify-between items-center relative">
+                    <div className="flex flex-col justify-center h-full">
+                      {Array.from({ length: node.inputs }, (_, i) => (
+                        <div
+                          key={`input-${i}`}
+                          className="w-4 h-4 bg-green-500 border-2 border-green-600 rounded-full cursor-pointer hover:scale-125 transition-transform absolute z-30 shadow-lg"
+                          style={{
+                            left: '-10px',
+                            top: `${50 + (i - (node.inputs - 1) / 2) * 25}px`
+                          }}
+                          onClick={(e) => handlePortClick(e, node.id, i, 'input')}
+                        />
+                      ))}
+                    </div>
+
+                    <div className="flex-1 text-center text-xs text-gray-500 px-4">
+                      <div className="text-gray-700 font-medium mb-1">ID: {node.id.slice(-6)}</div>
+                      <div className="flex justify-center items-center gap-4 text-xs">
+                        <span className="flex items-center gap-1">
+                          <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                          {node.inputs}
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
+                          {node.outputs}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col justify-center h-full">
+                      {Array.from({ length: node.outputs }, (_, i) => (
+                        <div
+                          key={`output-${i}`}
+                          className="w-4 h-4 bg-blue-500 border-2 border-blue-600 rounded-full cursor-pointer hover:scale-125 transition-transform absolute z-30 shadow-lg"
+                          style={{
+                            right: '-10px',
+                            top: `${50 + (i - (node.outputs - 1) / 2) * 25}px`
+                          }}
+                          onClick={(e) => handlePortClick(e, node.id, i, 'output')}
+                        />
+                      ))}
                     </div>
                   </div>
-
-                  <div className="flex flex-col justify-center h-full">
-                    {Array.from({ length: node.outputs }, (_, i) => (
-                      <div
-                        key={`output-${i}`}
-                        className="w-4 h-4 bg-blue-500 border-2 border-blue-600 rounded-full cursor-pointer hover:scale-125 transition-transform absolute z-30 shadow-lg"
-                        style={{
-                          right: '-10px',
-                          top: `${50 + (i - (node.outputs - 1) / 2) * 25}px`
-                        }}
-                        onClick={(e) => handlePortClick(e, node.id, i, 'output')}
-                      />
-                    ))}
-                  </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
 
             {/* Empty State */}
             {nodes.length === 0 && (
@@ -893,6 +1054,8 @@ const WorkflowEditor = () => {
                     <div>• Green (input) ↔ Blue (output) connections</div>
                     <div>• Click red circles on connections to delete them</div>
                     <div>• Multiple nodes can connect to the same input</div>
+                    <div>• Use Ctrl+Scroll or zoom controls to zoom</div>
+                    <div>• Middle-click or Ctrl+Click to pan around</div>
                   </div>
                 </div>
               </div>
