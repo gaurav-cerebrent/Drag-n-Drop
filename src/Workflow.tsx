@@ -2,9 +2,9 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { 
   ZoomIn, ZoomOut, RotateCcw, Settings
 } from 'lucide-react';
-import TopBar from './topbar';
-import LeftSidebar from './leftsidebar';
-import RightSidebar from './rightsidebar';
+import TopBar from './TopBar';
+import LeftSidebar from './LeftSideBar';
+import RightSidebar from './RightSideBar';
 
 interface Node {
   id: string;
